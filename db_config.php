@@ -1,4 +1,7 @@
 <?php
+
+define('SERVER_ADDR', 'domain');
+
 class Database {
     private $host = 'localhost';
     private $user = 'dbname';
