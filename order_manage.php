@@ -3,8 +3,6 @@ session_start();
 require_once 'db_config.php';
 
 
-
-
 // 检查是否登录
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
@@ -12,12 +10,13 @@ if (!isset($_SESSION['user_id'])) {
 }
 
 
-
-
 $database = new Database();
 $conn = $database->getConnection();
 
 
+// 增加错误日志记录
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 
 
 // 更新订单状态
@@ -25,6 +24,10 @@ if (isset($_GET['complete_orderid'])) {
     $orderid = $_GET['complete_orderid'];
     
     try {
+        // 开启数据库事务
+        $conn->beginTransaction();
+
+
         // 查询原订单信息
         $stmt = $conn->prepare("SELECT * FROM cusorders WHERE ORDERID = :orderid");
         $stmt->bindParam(':orderid', $orderid);
@@ -32,28 +35,76 @@ if (isset($_GET['complete_orderid'])) {
         $order = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($order) {
-            // 将订单插入完成订单表
-            $stmt = $conn->prepare("INSERT INTO overorder (ORDERID, CUSID, ORDERTIME, ORDERSTATE, ORDERTOTLEPRICE) VALUES (:orderid, :cusid, :ordertime, 3, :totleprice)");
-            $stmt->bindParam(':orderid', $order['ORDERID']);
-            $stmt->bindParam(':cusid', $order['CUSID']);
-            $stmt->bindParam(':ordertime', $order['ORDERTIME']);
-            $stmt->bindParam(':totleprice', $order['ORDERTOTLEPRICE']);
-            $stmt->execute();
-            
+            // 查询订单详情
+            $detailStmt = $conn->prepare("SELECT * FROM orderdetail WHERE ORDERID = :orderid");
+            $detailStmt->bindParam(':orderid', $orderid);
+            $detailStmt->execute();
+            $orderDetails = $detailStmt->fetchAll(PDO::FETCH_ASSOC);
+
+
+            // 获取当前时间戳
+            $currentTimestamp = time();
+
+
+            // 插入完成订单主表
+            $insertOverOrderStmt = $conn->prepare("
+                INSERT INTO overorder 
+                (ORDERID, CUSID, ORDERTIME, ORDERSTATE, ORDERTOTLEPRICE, COMPLETEDAT) 
+                VALUES (:orderid, :cusid, :ordertime, 3, :totleprice, NOW())
+            ");
+            $insertOverOrderStmt->execute([
+                ':orderid' => $order['ORDERID'],
+                ':cusid' => $order['CUSID'],
+                ':ordertime' => $currentTimestamp, // 使用当前时间戳
+                ':totleprice' => $order['ORDERTOTLEPRICE']
+            ]);
+
+
+            // 插入完成订单详情
+            $insertOverDetailStmt = $conn->prepare("
+                INSERT INTO overorderdetail 
+                (ORDERID, GID, GNAME, GCOUNT, GPRICE, GTIME) 
+                VALUES (:orderid, :gid, :gname, :gcount, :gprice, :gtime)
+            ");
+
+
+            foreach ($orderDetails as $detail) {
+                $insertOverDetailStmt->execute([
+                    ':orderid' => $orderid,
+                    ':gid' => $detail['GID'],
+                    ':gname' => $detail['GNAME'],
+                    ':gcount' => $detail['GCOUNT'],
+                    ':gprice' => $detail['GPRICE'],
+                    ':gtime' => $detail['GTIME'] ?? 0 // 提供默认值
+                ]);
+            }
+
+
             // 删除原订单
-            $stmt = $conn->prepare("DELETE FROM cusorders WHERE ORDERID = :orderid");
-            $stmt->bindParam(':orderid', $orderid);
-            $stmt->execute();
+            $conn->prepare("DELETE FROM orderdetail WHERE ORDERID = :orderid")
+                 ->execute([':orderid' => $orderid]);
+            $conn->prepare("DELETE FROM cusorders WHERE ORDERID = :orderid")
+                 ->execute([':orderid' => $orderid]);
+
+
+            // 提交事务
+            $conn->commit();
             
             header("Location: order_manage.php?success=1");
             exit();
+        } else {
+            throw new Exception("未找到订单");
         }
-    } catch(PDOException $e) {
-        $error = "订单处理失败: " . $e->getMessage();
+    } catch(Exception $e) {
+        // 回滚事务
+        $conn->rollBack();
+        
+        // 记录详细错误日志
+        error_log("订单处理失败: " . $e->getMessage());
+        header("Location: order_manage.php?error=" . urlencode($e->getMessage()));
+        exit();
     }
 }
-
-
 
 
 // 取消订单
@@ -61,50 +112,72 @@ if (isset($_GET['cancel_orderid'])) {
     $orderid = $_GET['cancel_orderid'];
     
     try {
+        // 开启事务
+        $conn->beginTransaction();
+
+
+        // 删除订单详情
+        $stmt = $conn->prepare("DELETE FROM orderdetail WHERE ORDERID = :orderid");
+        $stmt->bindParam(':orderid', $orderid);
+        $stmt->execute();
+
+
+        // 删除主订单
         $stmt = $conn->prepare("DELETE FROM cusorders WHERE ORDERID = :orderid");
         $stmt->bindParam(':orderid', $orderid);
         $stmt->execute();
+
+
+        // 提交事务
+        $conn->commit();
         
         header("Location: order_manage.php?cancel_success=1");
         exit();
     } catch(PDOException $e) {
-        $error = "取消订单失败: " . $e->getMessage();
+        // 回滚事务
+        $conn->rollBack();
+        
+        // 记录详细错误日志
+        error_log("取消订单失败: " . $e->getMessage());
+        header("Location: order_manage.php?error=" . urlencode($e->getMessage()));
+        exit();
     }
 }
 
 
-
-
 // 获取所有未完成订单和订单详情
-$stmt = $conn->query("
-    SELECT co.*, od.GNAME, od.GCOUNT, od.GPRICE 
-    FROM cusorders co 
-    JOIN orderdetail od ON co.ORDERID = od.ORDERID
-");
-$orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
+try {
+    $stmt = $conn->query("
+        SELECT co.*, od.GNAME, od.GCOUNT, od.GPRICE 
+        FROM cusorders co 
+        JOIN orderdetail od ON co.ORDERID = od.ORDERID
+    ");
+    $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 
-
-
-// 组织订单数据
-$processedOrders = [];
-foreach ($orders as $order) {
-    $orderid = $order['ORDERID'];
-    if (!isset($processedOrders[$orderid])) {
-        $processedOrders[$orderid] = [
-            'orderid' => $orderid,
-            'cusid' => $order['CUSID'],
-            'ordertime' => $order['ORDERTIME'],
-            'totleprice' => $order['ORDERTOTLEPRICE'],
-            'items' => []
+    // 组织订单数据
+    $processedOrders = [];
+    foreach ($orders as $order) {
+        $orderid = $order['ORDERID'];
+        if (!isset($processedOrders[$orderid])) {
+            $processedOrders[$orderid] = [
+                'orderid' => $orderid,
+                'cusid' => $order['CUSID'],
+                'ordertime' => strtotime($order['ORDERTIME']), // 转换为时间戳
+                'totleprice' => $order['ORDERTOTLEPRICE'],
+                'items' => []
+            ];
+        }
+        
+        $processedOrders[$orderid]['items'][] = [
+            'gname' => $order['GNAME'],
+            'gcount' => $order['GCOUNT'],
+            'gprice' => $order['GPRICE']
         ];
     }
-    
-    $processedOrders[$orderid]['items'][] = [
-        'gname' => $order['GNAME'],
-        'gcount' => $order['GCOUNT'],
-        'gprice' => $order['GPRICE']
-    ];
+} catch(PDOException $e) {
+    error_log("获取订单失败: " . $e->getMessage());
+    $processedOrders = [];
 }
 ?>
 

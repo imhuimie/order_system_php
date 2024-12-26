@@ -15,8 +15,13 @@ $conn = $database->getConnection();
 
 
 // 获取菜品类型
-$stmt = $conn->query("SELECT * FROM goodstype");
-$food_types = $stmt->fetchAll(PDO::FETCH_ASSOC);
+try {
+    $stmt = $conn->query("SELECT * FROM goodstype WHERE GTSTATE = 1");
+    $goodsTypes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch(PDOException $e) {
+    $type_error = "获取菜品类型失败: " . $e->getMessage();
+    $goodsTypes = []; // 确保即使出错也有默认值
+}
 
 
 // 处理添加菜品类型
@@ -79,60 +84,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_food'])) {
         if ($httpCode == 200 && isset($uploadResult['imageUrl'])) {
             $gimage = basename(parse_url($uploadResult['imageUrl'], PHP_URL_PATH));
         } else {
-            $error = "图片上传失败:" . ($uploadResult['message'] ?? '未知错误');
+            $error = "图片上传失败：" . ($uploadResult['message'] ?? '未知错误');
             error_log("图片上传失败: " . print_r($response, true));
         }
     }
-    
-    // 准备菜品数据
+
+
+    // 准备发送菜品数据
     $foodData = [
         'gtid' => $_POST['gtid'],
         'gname' => $_POST['gname'],
         'gprice' => $_POST['gprice'],
         'gcontent' => $_POST['gcontent'] ?? '',
         'ginfo' => $_POST['ginfo'] ?? '',
-        'gimage' => $gimage  // 将图片名传递给后端
+        'gtime' => $_POST['gtime'] ?? 5,  // 添加准备时间
+        'gstate' => 1,  // 默认状态为可用
+        'gimg' => $gimage  // 使用 GIMG 字段
     ];
-    $curl = curl_init();
-    $queryString = 'foodinfo=' . urlencode(json_encode($foodData));
-    
-    curl_setopt_array($curl, [
-        CURLOPT_URL => SERVER_ADDR . "/foodadmin/addGoods?" . $queryString,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPGET => true
-    ]);
 
 
-    $response = curl_exec($curl);
-    $httpCode = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-    $result = json_decode($response, true);
-    curl_close($curl);
-    
-    // 处理返回结果
-    if ($httpCode == 200 && isset($result['success']) && $result['success']) {
-        header("Location: food_manage.php?success=1");
-        exit();
-    } else {
-        $error = "添加菜品失败: " . ($result['message'] ?? '未知错误');
-    }
-}
-
-
-    
+    // 直接使用 PDO 插入数据库
     try {
         $stmt = $conn->prepare("
-            INSERT INTO goods (GTID, GNAME, GPRICE, GTIME, GINFO, GIMAGE) 
-            VALUES (:gtid, :gname, :gprice, :gtime, :ginfo, :gimage)
+            INSERT INTO goods (GTID, GNAME, GPRICE, GTIME, GSTATE, GINFO, GIMG) 
+            VALUES (:gtid, :gname, :gprice, :gtime, :gstate, :ginfo, :gimg)
         ");
         
-        $stmt->execute($foodData);
+        $result = $stmt->execute($foodData);
         
-        header("Location: food_manage.php?add_success=1");
-        exit();
+        if ($result) {
+            header("Location: food_manage.php?success=1");
+            exit();
+        } else {
+            $error = "添加菜品失败：数据库插入错误";
+        }
     } catch(PDOException $e) {
-        $error = "添加菜品失败: " . $e->getMessage();
+        $error = "添加菜品失败：" . $e->getMessage();
+        error_log("添加菜品失败: " . $e->getMessage());
     }
-
+}
 
 
 // 处理删除菜品
@@ -284,26 +274,26 @@ $foods = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     </div>
 
 
-                    <div class="col-md-6">
-                        <div class="card card-custom">
-                            <div class="card-header card-header-custom">
-                                <i class="fas fa-list me-2"></i>现有菜品类型
-                            </div>
-                            <div class="card-body">
-                                <ul class="list-group">
-                                    <?php foreach($food_types as $type): ?>
-                                        <li class="list-group-item d-flex justify-content-between align-items-center">
-                                            <?php echo htmlspecialchars($type['GTNAME']); ?>
-                                            <span class="badge bg-primary rounded-pill">
-                                                <?php echo $type['GTSTATE'] == 1 ? '启用中' : '已禁用'; ?>
-                                            </span>
-                                        </li>
-                                    <?php endforeach; ?>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                    <!-- 现有菜品类型 -->
+<div class="col-md-6">
+    <div class="card card-custom">
+        <div class="card-header card-header-custom">
+            <i class="fas fa-list me-2"></i>现有菜品类型
+        </div>
+        <div class="card-body">
+            <ul class="list-group">
+                <?php foreach($goodsTypes as $type): ?>
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        <?php echo htmlspecialchars($type['GTNAME']); ?>
+                        <span class="badge bg-primary rounded-pill">
+                            <?php echo $type['GTSTATE'] == 1 ? '启用中' : '已禁用'; ?>
+                        </span>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
+    </div>
+</div>
 
 
                 <!-- 添加菜品区域 -->
